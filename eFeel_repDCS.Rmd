@@ -1,0 +1,929 @@
+---
+title: "public bike sharing data"
+author: "Diana Coman Schmid"
+date: "3 Dezember 2016"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(include = FALSE)
+```
+
+Install and load required R packages:
+```{r,eval=FALSE,echo=TRUE, include=TRUE}
+# Check if packages are installed (install them if they are not), then load them into the R session.
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+
+packages <- c("ggplot2", "ggmap","rgdal","rgeos","maptools","dplyr","tidyr","tmap","maps","caret",
+              "rpart","rpart.plot","data.table","timeDate","lubridate","randomForest","MASS","ranger","igraph")
+
+#ipak(packages)
+
+
+lapply(packages, library,character.only=TRUE)
+
+```
+
+```{r,eval=TRUE,echo=FALSE, include=FALSE}
+# Check if packages are installed (install them if they are not), then load them into the R session.
+
+# ipak <- function(pkg){
+#   new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+#   if (length(new.pkg))
+#     install.packages(new.pkg, dependencies = TRUE)
+#   sapply(pkg, require, character.only = TRUE)
+# }
+
+
+packages <- c("ggplot2", "ggmap","rgdal","rgeos","maptools","dplyr","tidyr","tmap","maps","caret",
+              "rpart","rpart.plot","data.table","timeDate","lubridate","randomForest","MASS","ranger","igraph")
+
+#ipak(packages)
+
+
+lapply(packages, library,character.only=TRUE)
+
+```
+
+# **Import the data**
+* Parameters as described at data source (https://www.citibikenyc.com/system-data)
+    + Trip Duration (seconds)
+    + Start Time and Date
+    + Stop Time and Date
+    + Start Station Name
+    + End Station Name
+    + Station ID
+    + Station Lat/Long
+    + Bike ID
+    + User Type (Customer = 24-hour pass or 7-day pass user; Subscriber = Annual Member)
+    + Gender (Zero=unknown; 1=male; 2=female)
+    + Year of Birth
+
+*This data has been processed to remove trips that are taken by staff as they service 
+    and inspect the system, trips that are taken to/from any of our "test" stations (which
+    we were using more in June and July 2013), and any trips that were below 60 seconds in 
+    length (potentially false starts or users trying to re-dock a bike to ensure it's secure).*
+
+```{r,eval=TRUE,echo=TRUE,include=TRUE}
+
+# import speed comparison
+# system.time(read.csv("E://eFeel//201602-citibike-tripdata.csv",header=TRUE))
+# system.time(fread("E://eFeel//201602-citibike-tripdata.csv",header=TRUE))
+
+
+ef <- fread("C://Users//Diana//Desktop//eFeel//201602-citibike-tripdata.csv",header=TRUE)
+
+#/// on Mac
+# temp <- tempfile()
+# download.file("https://s3.amazonaws.com/tripdata/201602-citibike-tripdata.zip",temp, method="curl")
+# unzip(temp, file = "201602-citibike-tripdata.csv")
+# ef <- fread("201602-citibike-tripdata.csv",header=TRUE)
+# unlink(temp)
+
+str(ef)
+
+```
+
+# **Data preprocessing**
+
+```{r,eval=TRUE,echo=TRUE}
+
+# remove spaces in column names
+colnames(ef) <- gsub(" ","_",colnames(ef))
+
+# set to factor/numeric where relevant
+ef$tripduration <- as.numeric(ef$tripduration)
+ef$start_station_id <- as.factor(ef$start_station_id)
+ef$start_station_name <- gsub(" ","_",ef$start_station_name)
+ef$start_station_name <- as.factor(ef$start_station_name)
+ef$start_station_latitude <- as.numeric(ef$start_station_latitude)
+ef$start_station_longitude <- as.numeric(ef$start_station_longitude)
+ef$end_station_id <- as.factor(ef$end_station_id)
+ef$end_station_name <- gsub(" ","_",ef$end_station_name)
+ef$end_station_name <- as.factor(ef$end_station_name)
+ef$end_station_latitude <- as.numeric(ef$end_station_latitude)
+ef$end_station_longitude <- as.numeric(ef$end_station_longitude)
+ef$bikeid <- as.factor(ef$bikeid)
+ef$usertype <- as.factor(ef$usertype)
+ef$birth_year <- as.numeric(ef$birth_year)
+ef$gender <- as.factor(ef$gender)
+
+# note the data class of fread()
+class(ef)
+ef.s <- as.data.frame(ef)
+
+# filter out irrealistic values of parameters
+# tripduration (e.g. 1811000 sec = 503 hours...) -- typing error? 
+
+# summary(ef.s$tripduration)
+# quantile(ef.s$tripduration, c(0.05,0.95))
+
+par(mfrow=c(1,2))
+boxplot(log2(ef.s$tripduration),outcol="gray",main="tripduration (sec.; log2)",cex.main=0.75)
+abline(h=quantile(log2(ef.s$tripduration), c(0.05,0.95)),col="cornflowerblue")
+mtext(c("q5","q95"),side=4,at = quantile(log2(ef.s$tripduration), c(0.05,0.95)),col="cornflowerblue")
+
+
+plot(density(log2(ef.s$tripduration)),col="gray",main="tripduration (sec.; log2) distribution",cex.main=0.75)
+abline(v=quantile(log2(ef.s$tripduration), c(0.05,0.95)),col="cornflowerblue")
+mtext(c("q5","q95"),side = 1,at = quantile(log2(ef.s$tripduration), c(0.05,0.95)),col="cornflowerblue")
+
+
+tripd.s <- which(ef.s$tripduration >= quantile(ef.s$tripduration,0.05) &
+                   ef.s$tripduration <= quantile(ef.s$tripduration,0.95))
+#str(tripd.s)  
+#summary(ef.s$tripduration[tripd.s])
+
+
+# birth year (e.g. people born in 1885 are 131 in 2016 :) -- typing error 1885 instead of 1985?
+# note the Qs
+# quantile(ef.s$birth_year, c(0.005,0.995),na.rm = TRUE)
+
+
+par(mfrow=c(1,2))
+boxplot(ef.s$birth_year,outcol="gray",main="birth year",cex.main=0.75,na.rm=TRUE)
+abline(h=quantile(ef.s$birth_year, c(0.005,0.995),na.rm=TRUE),col="cornflowerblue")
+mtext(c("q0.5","q99"),side=4,at = quantile(ef.s$birth_year, c(0.005,0.995),na.rm=TRUE),col="cornflowerblue")
+
+
+plot(density(ef.s$birth_year,na.rm=TRUE),main="birth year distribution",cex.main=0.75)
+abline(v=quantile(ef.s$birth_year, c(0.005,0.995),na.rm=TRUE),col="cornflowerblue")
+mtext(c("q0.5","q99"),side = 1,at = quantile(ef.s$birth_year, c(0.005,0.995),na.rm=TRUE),col="cornflowerblue")
+
+
+byear.s <- which(ef.s$birth_year >= quantile(ef.s$birth_year,0.005,na.rm = TRUE) &
+                   ef.s$birth_year <= quantile(ef.s$birth_year,0.995,na.rm = TRUE))
+
+
+# define filter based on realistic tripduration and birth year values
+sel <- which(ef.s$tripduration >= quantile(ef.s$tripduration,0.05) &
+             ef.s$tripduration <= quantile(ef.s$tripduration,0.95) &
+             ef.s$birth_year >= quantile(ef.s$birth_year,0.005,na.rm = TRUE) &
+             ef.s$birth_year <= quantile(ef.s$birth_year,0.995,na.rm = TRUE))
+
+#str(sel)
+
+
+# subset data based on relevant parameter values
+ef.sel <- ef.s[sel,]
+
+# create time related variables 
+# week day; working day//week-end; hours; periods (e.g. night, morning, noon, etc.)
+
+ef.sel$timedate.start <-mdy_hms(ef.sel$starttime) 
+ef.sel$hours.start <- hour(ef.sel$timedate.start)
+#ef.sel$days.start <- wday(ef.sel$timedate.start)
+ef.sel$days.start <- wday(ef.sel$timedate.start,label=TRUE)
+ef.sel$weeks.start <- ceiling(day(ef.sel$timedate.start)/7)
+ef.sel$workday.start <- as.numeric(isWeekday(ef.sel$timedate.start))
+# ef.sel$pernum.start <- cut(ef.sel$hours.start, c(-Inf, 7, 10, 12, 17, Inf),
+#                                  labels=c(0, 1, 2, 3, 4))
+ef.sel$pernum.start <- cut(ef.sel$hours.start, c(-Inf, 7, 10, 12, 17, Inf),
+                                 labels=c("night", "morning", "noon", "afternoon", "evening"))
+
+ef.sel$age <- cut(ef.sel$birth_year, c(-Inf,1960,1980,Inf),
+                            labels=c("old","mid_age","young"),
+                              right=T)
+
+
+# round time to nearest hour
+ef.sel$nearestH.start <- floor_date(ef.sel$timedate.start,"hour")
+
+str(ef.sel)
+summary(ef.sel)
+
+```
+
+# Explore the data
+
+```{r,eval=TRUE,echo=TRUE,include=TRUE}
+
+# total number of stations (start)
+length(levels(ef.sel$start_station_name))
+
+# usertype
+# there is no birth year info for Customers (obviously; see data description at source)
+# the subsequent analyses ignore the Customers
+
+table(ef.s$usertype)
+table(ef.sel$usertype)
+
+
+par(mfrow=c(1,1))
+hist(ef.s$birth_year,main="birth year distribution for Customers and Subscribers",cex.main=0.75,xlab="year",col=rgb(0.1,0.1,0.1,0.25))
+hist(ef.s[which(ef.sel$usertype == "Subscriber"),"birth_year"],main="birth year distribution for Subscribers",cex.main=0.75,xlab="year",col=rgb(1,1,0,0.25),add=TRUE)
+
+yr.cust <- ef.s[which(ef.s$usertype == "Customer"),"birth_year"]
+str(yr.cust)
+
+# gender
+
+bpg <- barplot(table(ef.sel$gender),main="number of women and men",cex.main=0.75,xaxt="n")
+axis(1,at = bpg,labels = c("na","men","women"),las=2)
+
+
+# number of bikes in total
+# length(unique(ef.s$bikeid))
+length(unique(ef.sel$bikeid))
+
+# time span in days
+difftime(max(ef.sel$timedate.start),min(ef.sel$timedate.start))
+
+# time (week days, time periods)
+
+par(mfrow=c(1,3))
+barplot(table(ef.sel$days.start),main="count week days",cex.main=0.75,las=2)
+bpw <- barplot(table(ef.sel$workday.start),main="count of week-end days // work days",cex.main=0.75,xaxt="n")
+axis(1,at = bpw,labels = c("week-end","work day"),las=2)
+bpp <- barplot(table(ef.sel$pernum.start),main="count of time period ",cex.main=0.75,las=2)#,xaxt="n")
+
+# bike demand per station, hour, week day, working day, gender, age
+# bike count per age and hour;
+
+bikeage.fr.start <- aggregate(bikeid ~ hours.start+age, data = ef.sel, FUN = function(x){NROW(unique(x))})
+head(bikeage.fr.start)
+
+
+peak.bikeage.fr.start <- bikeage.fr.start[which(bikeage.fr.start$bikeid >= 
+                                              quantile(bikeage.fr.start$bikeid,0.95)),]
+
+high.bikeage.fr.start <- bikeage.fr.start[which(bikeage.fr.start$bikeid < 
+                                              quantile(bikeage.fr.start$bikeid,0.95) &
+                                              bikeage.fr.start$bikeid >= 
+                                              quantile(bikeage.fr.start$bikeid,0.75)),]
+
+
+par(mfrow=c(1,1))
+ggplot(data=bikeage.fr.start, aes(x=hours.start,y=bikeid,group=1)) + 
+  geom_line(col="gray")+
+  geom_point(col="gray")+
+  geom_point(data=peak.bikeage.fr.start, colour="red",size=3) +
+  geom_point(data=high.bikeage.fr.start, colour="orange",size=2) +
+  geom_text(data=peak.bikeage.fr.start, label=peak.bikeage.fr.start$hours.start, 
+            vjust= -1,col="gray",size=3) +
+  facet_grid(~ age) +
+  ylab("bike count")
+
+# number of bikes per hour per day
+bikeh.fr.start <- aggregate(bikeid ~ hours.start+days.start, data = ef.sel, FUN = function(x){NROW(unique(x))})
+head(bikeh.fr.start)
+
+
+peak.bikeh.fr.start <- bikeh.fr.start[which(bikeh.fr.start$bikeid >= 
+                                              quantile(bikeh.fr.start$bikeid,0.95)),]
+
+high.bikeh.fr.start <- bikeh.fr.start[which(bikeh.fr.start$bikeid < 
+                                              quantile(bikeh.fr.start$bikeid,0.95) &
+                                              bikeh.fr.start$bikeid >= 
+                                              quantile(bikeh.fr.start$bikeid,0.75)),]
+
+
+par(mfrow=c(1,1))
+ggplot(data=bikeh.fr.start, aes(x=hours.start,y=bikeid,group=1)) + 
+  geom_line(col="gray")+
+  geom_point(col="gray")+
+  geom_point(data=peak.bikeh.fr.start, colour="red",size=3) +
+  geom_point(data=high.bikeh.fr.start, colour="orange",size=2) +
+  geom_text(data=peak.bikeh.fr.start, label=peak.bikeh.fr.start$hours.start, 
+            vjust= -1,col="gray",size=3) +
+  facet_grid(~ days.start) +
+  ylab("bike count")
+
+
+# number of bikes per hour per time periods
+bikeper.fr.start <- aggregate(bikeid ~ pernum.start+days.start, data = ef.sel, FUN = function(x){NROW(unique(x))})
+head(bikeper.fr.start)
+
+peak.bikeper.fr.start <- bikeper.fr.start[which(bikeper.fr.start$bikeid >= 
+                                              quantile(bikeper.fr.start$bikeid,0.95)),]
+
+high.bikeper.fr.start <- bikeper.fr.start[which(bikeper.fr.start$bikeid < 
+                                              quantile(bikeper.fr.start$bikeid,0.95) &
+                                              bikeper.fr.start$bikeid >= 
+                                              quantile(bikeper.fr.start$bikeid,0.75)),]
+
+
+par(mfrow=c(1,1))
+ggplot(data=bikeper.fr.start, aes(x=pernum.start,y=bikeid,group=1)) + 
+
+  geom_line(col="gray")+
+  geom_point(col="gray")+
+  geom_point(data=peak.bikeper.fr.start, colour="red",size=3) +
+  geom_point(data=high.bikeper.fr.start, colour="orange",size=2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+
+  facet_grid(~ days.start)+
+  ylab("bike count")
+
+# number of bikes per hour per work day / week-end
+
+bikew.fr.start <- aggregate(bikeid ~ hours.start+workday.start, data = ef.sel, FUN = function(x){NROW(unique(x))})
+head(bikew.fr.start)
+
+peak.bikew.fr.start <- bikew.fr.start[which(bikew.fr.start$bikeid >= 
+                                              quantile(bikew.fr.start$bikeid,0.95)),]
+
+high.bikew.fr.start <- bikew.fr.start[which(bikew.fr.start$bikeid < 
+                                              quantile(bikew.fr.start$bikeid,0.95) &
+                                              bikew.fr.start$bikeid >= 
+                                              quantile(bikew.fr.start$bikeid,0.75)),]
+
+
+lbs.w <- c("0" = "week-end", "1" = "working day")
+
+par(mfrow=c(1,1))
+
+ggplot(data=bikew.fr.start, aes(x=hours.start,y=bikeid,group=1)) + 
+
+  geom_line(col="gray")+
+  geom_point(col="gray")+
+  geom_point(data=peak.bikew.fr.start, colour="red",size=3) +
+  geom_point(data=high.bikew.fr.start, colour="orange",size=2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+
+  facet_grid(~ workday.start, labeller=labeller(workday.start = lbs.w))+
+  ylab("bike count")
+
+# number of bikes per time periods per work day / week-end
+
+bikewper.fr.start <- aggregate(bikeid ~ pernum.start+workday.start, data = ef.sel, FUN = function(x){NROW(unique(x))})
+head(bikewper.fr.start)
+
+peak.bikewper.fr.start <- bikewper.fr.start[which(bikewper.fr.start$bikeid >= 
+                                              quantile(bikewper.fr.start$bikeid,0.95)),]
+
+high.bikewper.fr.start <- bikewper.fr.start[which(bikewper.fr.start$bikeid < 
+                                              quantile(bikewper.fr.start$bikeid,0.95) &
+                                              bikewper.fr.start$bikeid >= 
+                                              quantile(bikewper.fr.start$bikeid,0.75)),]
+
+
+lbs.wper <- c("0" = "week-end", "1" = "working day")
+
+
+par(mfrow=c(1,1))
+ggplot(data=bikewper.fr.start, aes(x=pernum.start,y=bikeid,group=1)) + 
+
+  geom_line(col="gray")+
+  geom_point(col="gray")+
+  geom_point(data=peak.bikewper.fr.start, colour="red",size=3) +
+  geom_point(data=high.bikewper.fr.start, colour="orange",size=2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+
+  facet_grid(~ workday.start, labeller=labeller(workday.start = lbs.wper))+
+  ylab("bike count")
+
+#///start stations popularity and neighborhood
+# create a list (not appropriate to use here aggregation) with start station names as elements
+# store the bike count (as "unique(...$bikeid)") and GPS coordinates
+
+
+st.bike.l <- list()
+st <- unique(ef.sel$start_station_name)
+# str(st)
+
+for (s in st){
+  st.bike.l[[s]] <- list(ef.sel[which(ef.sel$start_station_name == s),"bikeid"],
+                         unique(ef.sel[which(ef.sel$start_station_name == s),"start_station_longitude"]),
+                         unique(ef.sel[which(ef.sel$start_station_name == s),"start_station_latitude"]),
+                         unique(ef.sel[which(ef.sel$start_station_name == s),"end_station_name"]))
+}
+
+
+pop.st <- data.frame(lon=rep(0,length(names(st.bike.l))),
+                     lat=rep(0,length(names(st.bike.l))),
+                     bikecount=rep(0,length(names(st.bike.l))),
+                     endstations=rep(0,length(names(st.bike.l))))
+rownames(pop.st) <- names(st.bike.l)
+
+
+for (l in names(st.bike.l)){
+  pop.st[l,"lon"] <- st.bike.l[[l]][[2]]
+  pop.st[l,"lat"] <- st.bike.l[[l]][[3]]
+  pop.st[l,"bikecount"] <- length(st.bike.l[[l]][[1]])
+  pop.st[l,"endstations"] <- length(st.bike.l[[l]][[4]])
+}
+
+head(pop.st[order(- pop.st$bikecount),])
+tail(pop.st[order(- pop.st$bikecount),])
+
+
+# correlation of bike number and connected end stations number (expected)
+
+par(mfrow=c(1,1))
+
+plot(log2(pop.st$endstations+1),log2(pop.st$bikecount+1),col="gray",pch=18,xlab="no. of connected end stations (log2)",
+     ylab="no. of bikes (log2)")
+abline(coef(lm(log2(pop.st$bikecount+1) ~ log2(pop.st$endstations+1))),col="cornflowerblue")
+mtext(paste("r.sq= ",round(summary(lm(log2(pop.st$bikecount+1) ~ log2(pop.st$endstations+1)))$r.squared,2)),3,col="cornflowerblue",cex=0.75)
+
+
+# plot start tations (size and color mapped onto bike counts log2) on map
+
+#quantile(log2(pop.st$bikecount+1),c(0.75,0.95))
+                                           
+
+pop.st$plotsize <- sapply(log2(pop.st$bikecount+1), function (s) 
+                                            ifelse(s <= quantile(log2(pop.st$bikecount+1),0.75),2,
+                                              ifelse(s <= quantile(log2(pop.st$bikecount+1),0.95),5,8)))
+pop.st$plotcol <- sapply(log2(pop.st$bikecount+1), function (s) 
+                                            ifelse(s <= quantile(log2(pop.st$bikecount+1),0.75),"cornflowerblue",
+                                              ifelse(s <= quantile(log2(pop.st$bikecount+1),0.95),"orange","red")))
+
+head(pop.st)
+
+par(mfrow=c(1,1))
+
+NYmap <- qmap('newyork', zoom = 12,color = 'bw')
+
+NYmap + 
+  geom_point(aes(x = lon, y = lat),
+                 size=pop.st$plotsize,
+                 colour=pop.st$plotcol,
+             pch=20,alpha=0.5,
+             data = pop.st)
+
+```
+
+
+# Machine learning with rpart and 10-fold cross-validation of predictions and random forests
+
+```{r,eval=FALSE,echo=TRUE,include=TRUE}
+# data formatting
+# one model per station 
+# create new predictor: lag1 (shifed 1h behind) stations (all except the current station)
+
+stations.l.test <- vector("list",length(strsplit(levels(ef.param.sel$start_station_name),",")))
+names(stations.l.test) <- strsplit(levels(ef.param.sel$start_station_name),",")
+
+shift.l.test <- vector("list",length(strsplit(levels(ef.param.sel$start_station_name),",")))
+names(shift.l.test) <- strsplit(levels(ef.param.sel$start_station_name),",")
+
+# test on random sampled stations
+
+# set.seed(909)
+# names(...)[sample(50)]
+
+
+
+for (s in names(stations.l.test)){
+
+  tst.set <- ef.param.sel[which(ef.param.sel$start_station_name == s),]
+  bike.count.y0 <- aggregate(bikeid ~ nearestH.start, data = tst.set, FUN = function(x){NROW(unique(x))})
+  tr.train.df <- bike.count.y0
+  tr.train.df$bikecount.s <- log2(tr.train.df$bikeid+1)
+  
+  timerange <- data.frame(nearestH.start=unique(ef.param.sel$nearestH.start))
+  tr.train.df.fulltime <- merge(timerange,tr.train.df,by="nearestH.start",all.x = TRUE)
+  tr.train.df.fulltime$bikecount.s[is.na(tr.train.df.fulltime$bikecount.s)] <- 0
+  
+  #shift ahead the bike counts for the current station
+  tr.train.df.fulltime$bikeidsh <- shift(tr.train.df.fulltime$bikecount.s,1,type = "lead")
+  tr.train.df.fulltime$bikeidsh[is.na(tr.train.df.fulltime$bikeidsh)] <- 0
+  
+ 
+  tr.train.df.fulltime$bikeDclass <- ifelse(tr.train.df.fulltime$bikeidsh == 0,"empty",
+                                            ifelse(tr.train.df.fulltime$bikeidsh <=  quantile(tr.train.df.fulltime$bikeidsh,0.05),"low",
+                                                   ifelse(tr.train.df.fulltime$bikeidsh <= quantile(tr.train.df.fulltime$bikeidsh,0.5),"medium",
+                                                          ifelse(tr.train.df.fulltime$bikeidsh <= quantile(tr.train.df.fulltime$bikeidsh,0.95),"high","peak"))))
+  
+  tr.train.df.fulltime$bikeDclass <- as.factor(tr.train.df.fulltime$bikeDclass)
+
+  tr.train.df.fulltime$days.start.s <- wday(tr.train.df.fulltime$nearestH.start)
+  tr.train.df.fulltime$hours.start.s <- hour(tr.train.df.fulltime$nearestH.start)
+  tr.train.df.fulltime$workday.start <- as.numeric(isWeekday(tr.train.df.fulltime$nearestH.start))
+  
+  tr.train.df.fulltime$pernum.start.s <- cut(tr.train.df.fulltime$hours.start.s, c(-Inf, 7, 10, 12, 17, Inf),
+                                             labels=c("night", "morning","noon","afternoon","evening"))
+  
+  
+  tr.train.df.fulltime$workday.start <- as.factor(tr.train.df.fulltime$workday.start)
+  
+  tr.train.df.fulltime$days.start.s <- as.factor(tr.train.df.fulltime$days.start.s)
+  tr.train.df.fulltime$hours.start.s <- as.factor(tr.train.df.fulltime$hours.start.s)
+
+  stations.l.test[[s]] <- tr.train.df.fulltime
+  
+  # shift by 1h (lag) the bike counts 
+  
+  shift.l.test[[s]] <- data.frame(tr.train.df.fulltime$nearestH.start,
+                             shift(tr.train.df.fulltime$bikecount.s,1))
+  shift.l.test[[s]][,2][is.na(shift.l.test[[s]][,2])] <- 0
+  
+  colnames(shift.l.test[[s]]) <- c("nearestH.start",paste0("lag_",s))
+
+  shift.l.test[[s]]$shifted <- ifelse(shift.l.test[[s]][,2] == 0,"empty",
+                                          ifelse(shift.l.test[[s]][,2] <= quantile(shift.l.test[[s]][,2],0.25),"low",
+                                                 ifelse(shift.l.test[[s]][,2] <= quantile(shift.l.test[[s]][,2],0.5),"medium",
+                                                        ifelse(shift.l.test[[s]][,2] <= quantile(shift.l.test[[s]][,2],0.95),"high","peak"))))
+
+  shift.l.test[[s]]$shifted <- as.factor(shift.l.test[[s]]$shifted)  
+  shift.l.test[[s]][,2] <- NULL
+  colnames(shift.l.test[[s]]) <- c("nearestH.start",paste0("lagclass_",s))
+}
+
+# for each ML formatted dataset (one per start station), add the shifted bike counts of the remaining stations
+
+for (s in 1:length(stations.l.test)){  
+  cat("processing item: ",s,"\n")
+  shift.m <- Reduce(function(x,y) merge(x,y, all=T,by.x='nearestH.start',by.y='nearestH.start'),
+                             shift.l.test[-s], 
+                             accumulate=F)
+
+  stations.l.test[[s]] <- cbind(stations.l.test[[s]],shift.m)
+
+}
+
+
+# save(stations.l.test,file="E://eFeel//RandstationsML")
+# save(stations.l.test,file="/Users/Diana/eFeel/stationsML")
+
+# ML 
+
+# source("http://stat.ethz.ch/Teaching/WBL/Source-WBL-5/03.RCodes/dm-serie2.R")
+CVtest <-function(fitfn, predfn, data, k = 10, verbose=TRUE, ...){
+  n <- nrow(data)
+  stopifnot(is.numeric(n), n >= 1, 1 <= k, k <= n)
+  ii <- sample(n)
+  res <- numeric(n)
+  j1 <- 1                          ## Start des ersten Blocks
+  if(verbose) cat("fold ")
+  for (i in 1:k) {
+    j2 <- (i*n) %/% k              ## Ende des i-ten Blocks
+    j <- ii[j1:j2]                 ## Indizes der Test-Beob im Fold i
+    fitted.model <- fitfn(data = data[-j,], ...)
+    if(verbose) { cat(i, ""); flush.console() }
+    res[j] <- predfn(fitted.model, newdata = data[j,])
+    j1 <- j2 + 1                   ## Start des (i+1)-ten Blocks
+  }; if(verbose) cat("\n")
+  res
+}
+
+# adjust the "con" at return 
+con.dcs <-function(...){
+  tab <- table(...)
+  t0 <- tab ; diag(t0) <- 0
+  cv.er <- round(100*sum(t0)/length(list(...)[[1]]), 2)
+  return(list(CV10.cm=tab,CV10.er=cv.er))
+}
+
+set.seed(909)
+
+stationMod.l <- vector("list",length(names(stations.l.test)))
+names(stationMod.l) <- names(stations.l.test)
+
+
+for(m in names(stations.l.test)){
+    cat("processing item: ",m,"\n")
+    tst.d <- stations.l.test[[m]]
+    pred <- colnames(tst.d)[grep("^lag",colnames(tst.d))] 
+    pred <- c("bikeDclass","workday.start", "days.start.s","pernum.start.s",pred)
+    
+    res.rpart <- CVtest(function(...) rpart(bikeDclass ~ ., ...),
+                    function(obj, ...) predict(obj, type = "class", ...),
+                    data = tst.d[,pred])
+
+    msc <- con.dcs(true = tst.d$bikeDclass, "CV-predicted" = res.rpart)
+
+    rp <- rpart(bikeDclass ~ ., data=tst.d[,pred],
+              control=rpart.control(cp=0.0, minsplit=5, xval=nrow(tst.d[,pred])))
+
+    rf <- ranger(bikeDclass ~ ., data = tst.d[,pred], importance = "permutation")
+    
+    stationMod.l[[m]] <- list(msc,rp,rf)
+    names(stationMod.l[[m]]) <- c("CV10rpart_MSC","rpart","rf")
+}
+
+
+# save(stationMod.l,file="E://eFeel//RandstationMod")
+# save(stationMod.l,file="/Users/Diana/eFeel/stationMod")
+
+```
+
+# ML evaluation
+
+```{r,eval=TRUE,echo=TRUE}
+
+# load ML formatted list and ML models for each station
+load(file="C://Users//Diana//Desktop//eFeel//stationsML")
+load(file="C://Users//Diana//Desktop//eFeel//stationMod")
+
+#/// model performance overview
+# distribution of the CV10 error rate (rpart) and OOB error rate (radom forests)
+
+CV10.er <- sapply(stationMod.l, function(x) x[[1]]$CV10.er)
+str(CV10.er)
+rf.er <- sapply(stationMod.l, function(x) x[[3]]$prediction.error*100)
+str(rf.er)
+
+par(mfrow=c(1,2))
+hist(CV10.er,col="gray",main="rpart CV10 prediction error rate distribution",cex.main=0.75)
+abline(v=quantile(CV10.er,0.5),col="cornflowerblue",lwd=2)
+mtext(paste0("q5%: ",round(quantile(CV10.er,0.5))),at=quantile(CV10.er,0.5),side=3,col="cornflowerblue",cex=0.5)
+hist(rf.er,col="gray",main="ranger OOB prediction error rate distribution",cex.main=0.75)
+abline(v=quantile(rf.er,0.5),col="cornflowerblue",lwd=2)
+mtext(paste0("q5%: ",round(quantile(rf.er,0.5))),at=quantile(rf.er,0.5),side=3,col="cornflowerblue",cex=0.5)
+par(mfrow=c(1,1))
+
+# how are "peak" and "high" bike demand predicted with CV10 rpart
+maxpeak <- sapply(stationMod.l, function(x) rowSums(x[[1]]$CV10.cm)["peak"])
+maxpeak[which.max(maxpeak)]
+
+stationMod.l[["11_Ave_&_W_27_St"]][[1]]
+
+maxhigh <- sapply(stationMod.l, function(x) rowSums(x[[1]]$CV10.cm)["high"])
+maxhigh[which.max(maxhigh)]
+
+stationMod.l[["E_72_St_&_Park_Ave"]][[1]]
+
+
+# top3 most important predictors (ranger)
+
+featureImportance <- data.frame(Feature=names(importance(stationMod.l[[1]][[3]])),Importance=importance(stationMod.l[[1]][[3]]))
+a=featureImportance[order(- featureImportance$Importance),][1:10,]
+
+rf.fi <- list()
+for (l in names(stationMod.l)){
+  fI <- data.frame(Feature=names(importance(stationMod.l[[l]][[3]])),Importance=importance(stationMod.l[[l]][[3]]))
+  rf.fi[[l]] <- fI[order(- fI$Importance),][1:10,]
+}
+
+rf.fi.df <- do.call("rbind",rf.fi)
+rownames(rf.fi.df) <- NULL
+head(rf.fi.df)
+
+pr.fr <-as.data.frame(table(rf.fi.df$Feature))
+head(pr.fr[order(- pr.fr$Freq),],10)
+
+par(mfrow=c(1,2))
+hist(rf.fi.df[which(rf.fi.df$Feature == "lagclass_E_47_St_&_Park_Ave"),"Importance"],main="lagclass_E_47_St_&_Park_Ave importance ranger",cex.main=0.75,xlab="Importance")
+abline(v=mean(rf.fi.df$Importance),col="cornflowerblue",lwd=2)
+mtext(paste0("mean predictor importance:",round(mean(rf.fi.df$Importance),3)),cex=0.5,side=3,at=mean(rf.fi.df$Importance),col="cornflowerblue")
+
+
+
+hist(rf.fi.df[which(rf.fi.df$Feature == "pernum.start.s"),"Importance"],main="pernum.start.s importance ranger",cex.main=0.75,xlab="Importance")
+abline(v=mean(rf.fi.df$Importance),col="cornflowerblue",lwd=2)
+mtext(paste0("mean predictor importance:",round(mean(rf.fi.df$Importance),3)),cex=0.5,side=3,at=mean(rf.fi.df$Importance),col="cornflowerblue")
+par(mfrow=c(1,1))
+```
+
+# top 3 popular stations (ML summaries and plots)
+
+```{r,eval=TRUE,echo=TRUE}
+head(pop.st)
+
+
+pop.st$plotsizesel <- sapply(log2(pop.st$bikecount+1), function (s) 
+                                            ifelse(s <= quantile(log2(pop.st$bikecount+1),0.75),8,
+                                              ifelse(s <= quantile(log2(pop.st$bikecount+1),0.95),15,25)))
+
+```
+## No.1 start station (i.e. highest bike count): Pershing_Square_North
+
+```{r,eval=TRUE,echo=TRUE}
+
+pop.st[order(- pop.st$bikecount),][1:3,]
+p.st.ML <- stationMod.l[rownames(pop.st[order(- pop.st$bikecount),][1:3,])]
+summary(p.st.ML)
+
+cat("No1 popular station: ",names(p.st.ML)[1],"CV10 rpart","\n")
+p.st.ML[[1]][[1]]
+
+rp.p <- p.st.ML[[1]][[2]]
+plotcp(rp.p)
+printcp(rp.p)
+
+#prp(rp, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+rp.p.pr <- prune.rpart(rp.p, cp=0.0276382)
+prp(rp.p.pr, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+
+cat("No1 popular station: ",names(p.st.ML)[1],"ranger","\n")
+rf.p <- p.st.ML[[1]][[3]]
+featureImportance <- data.frame(Feature=names(importance(rf.p)),Importance=importance(rf.p))
+featureImportance <- featureImportance[order(- featureImportance$Importance),][1:10,]
+
+p <- ggplot(featureImportance, aes(x=reorder(Feature, Importance), y=Importance)) +
+  geom_bar(stat="identity", fill="cornflowerblue") +
+  coord_flip() + 
+  theme_light(base_size=14) +
+  xlab("Importance") +
+  ylab("") + 
+  ggtitle("Random Forest Feature Importance\n") +
+  theme(plot.title=element_text(size=12))
+
+p
+
+# is lag station a neighbor?
+
+# plot start tations (size and color mapped onto bike counts log2) on map
+
+#quantile(log2(pop.st$bikecount+1),c(0.75,0.95))
+
+stn <- c(ps="Pershing_Square_North",rp1="E_47_St_&_Park_Ave",rng="South_End_Ave_&_Liberty_St")
+
+pop.st.sel <- pop.st[stn,]
+
+pop.st.sel$endlon <- pop.st.sel[1,"lon"]
+pop.st.sel$endlat <- pop.st.sel[1,"lat"]
+
+pop.st.sel
+```
+
+```{r, out.width = '\\maxwidth'}
+par(mfrow=c(1,1))
+
+NYmap <- qmap('newyork', zoom = 12,color = 'bw')
+
+
+NYmap + 
+  geom_point(aes(x = lon, y = lat),
+                 size=pop.st.sel$plotsizesel,
+                 colour=pop.st.sel$plotcol,
+             pch=20,alpha=0.55,
+             data = pop.st.sel)+
+
+  geom_text(data=pop.st.sel, col="blue",label=stn, 
+            vjust= -1,hjust=1,size=3) +
+
+  geom_segment(aes(x = lon, y = lat,
+                       xend = endlon, yend = endlat),
+                   colour="blue",
+                   alpha=0.35,lwd=2,
+                   pop.st.sel[-1,],arrow=arrow(type = "closed")) +
+  geom_text(data = pop.st.sel[-1,], aes(x = lon, y = lat), hjust=-1.15,label = names(stn)[-1],col="magenta")
+
+ 
+
+
+
+```
+## No.2 start station (i.e. highest bike count): W_21_St_&_6_Ave
+
+```{r,eval=TRUE,echo=TRUE}
+
+cat("No2 popular station: ",names(p.st.ML)[2],"CV10 rpart","\n")
+p.st.ML[[2]][[1]]
+
+rp.p <- p.st.ML[[2]][[2]]
+plotcp(rp.p)
+printcp(rp.p)
+
+#prp(rp, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+rp.p.pr <- prune.rpart(rp.p, cp=0.0236908)
+prp(rp.p.pr, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+
+cat("No2 popular station: ",names(p.st.ML)[2],"ranger","\n")
+rf.p <- p.st.ML[[2]][[3]]
+featureImportance <- data.frame(Feature=names(importance(rf.p)),Importance=importance(rf.p))
+featureImportance <- featureImportance[order(- featureImportance$Importance),][1:10,]
+
+p <- ggplot(featureImportance, aes(x=reorder(Feature, Importance), y=Importance)) +
+  geom_bar(stat="identity", fill="cornflowerblue") +
+  coord_flip() + 
+  theme_light(base_size=14) +
+  xlab("Importance") +
+  ylab("") + 
+  ggtitle("Random Forest Feature Importance\n") +
+  theme(plot.title=element_text(size=12))
+
+p
+
+# is lag station a neighbor?
+
+# plot start tations (size and color mapped onto bike counts log2) on map
+
+#quantile(log2(pop.st$bikecount+1),c(0.75,0.95))
+
+
+stn <- c(ps="W_21_St_&_6_Ave",rp1="E_47_St_&_Park_Ave",rp2="Henry_St_&_Grand_St",rng="South_End_Ave_&_Liberty_St")
+
+pop.st.sel <- pop.st[stn,]
+
+pop.st.sel$endlon <- pop.st.sel[1,"lon"]
+pop.st.sel$endlat <- pop.st.sel[1,"lat"]
+
+pop.st.sel
+
+```
+```{r, out.width = '\\maxwidth'}
+par(mfrow=c(1,1))
+
+NYmap <- qmap('newyork', zoom = 12,color = 'bw')
+
+
+NYmap + 
+  geom_point(aes(x = lon, y = lat),
+                 size=pop.st.sel$plotsizesel,
+                 colour=pop.st.sel$plotcol,
+             pch=20,alpha=0.55,
+             data = pop.st.sel)+
+
+  geom_text(data=pop.st.sel, col="blue",label=stn, 
+            vjust= -1,hjust=1,size=3) +
+
+  geom_segment(aes(x = lon, y = lat,
+                       xend = endlon, yend = endlat),
+                   colour="blue",
+                   alpha=0.35,lwd=2,
+                   pop.st.sel[-1,],arrow=arrow(type = "closed")) +
+  geom_text(data = pop.st.sel[-1,], aes(x = lon, y = lat), hjust=-1.15,label = names(stn)[-1],col="magenta")
+
+ 
+
+
+```
+## No.3 start station (i.e. highest bike count): Lafayette_St_&_E_8_St
+
+```{r,eval=TRUE,echo=TRUE}
+
+cat("No3 popular station: ",names(p.st.ML)[3],"CV10 rpart","\n")
+p.st.ML[[3]][[1]]
+
+rp.p <- p.st.ML[[3]][[2]]
+plotcp(rp.p)
+printcp(rp.p)
+
+#prp(rp, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+rp.p.pr <- prune.rpart(rp.p, cp=0.0284238)
+prp(rp.p.pr, type = 4, extra = 1,varlen = 0,clip.right.labs = F,box.palette = "auto")
+
+cat("No3 popular station: ",names(p.st.ML)[3],"ranger","\n")
+rf.p <- p.st.ML[[3]][[3]]
+featureImportance <- data.frame(Feature=names(importance(rf.p)),Importance=importance(rf.p))
+featureImportance <- featureImportance[order(- featureImportance$Importance),][1:10,]
+
+p <- ggplot(featureImportance, aes(x=reorder(Feature, Importance), y=Importance)) +
+  geom_bar(stat="identity", fill="cornflowerblue") +
+  coord_flip() + 
+  theme_light(base_size=14) +
+  xlab("Importance") +
+  ylab("") + 
+  ggtitle("Random Forest Feature Importance\n") +
+  theme(plot.title=element_text(size=12))
+
+p
+
+# is lag station a neighbor?
+
+stn <- c(ps="Lafayette_St_&_E_8_St",rp1.rng="E_47_St_&_Park_Ave",rp2="E_24_St_&_Park_Ave_S")
+
+pop.st.sel <- pop.st[stn,]
+
+pop.st.sel$endlon <- pop.st.sel[1,"lon"]
+pop.st.sel$endlat <- pop.st.sel[1,"lat"]
+
+pop.st.sel
+
+```
+
+```{r, out.width = '\\maxwidth'}
+
+par(mfrow=c(1,1))
+
+NYmap <- qmap('newyork', zoom = 12,color = 'bw')
+
+NYmap + 
+  geom_point(aes(x = lon, y = lat),
+                 size=pop.st.sel$plotsizesel,
+                 colour=pop.st.sel$plotcol,
+             pch=20,alpha=0.55,
+             data = pop.st.sel)+
+
+  geom_text(data=pop.st.sel, col="blue",label=stn, 
+            vjust= -1,hjust=1,size=3) +
+
+  geom_segment(aes(x = lon, y = lat,
+                       xend = endlon, yend = endlat),
+                   colour="blue",
+                   alpha=0.35,lwd=2,
+                   pop.st.sel[-1,],arrow=arrow(type = "closed")) +
+  geom_text(data = pop.st.sel[-1,], aes(x = lon, y = lat), hjust=-1.15,label = names(stn)[-1],col="magenta")
+
+ 
+
+```
+# R session info
+
+```{r,eval=TRUE,echo=TRUE}
+
+sessionInfo()
+
+
+```
